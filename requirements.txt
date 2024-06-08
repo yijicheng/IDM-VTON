@@ -1,0 +1,27 @@
+accelerate==0.25.0
+torchmetrics==1.2.1
+tqdm==4.66.1
+transformers==4.36.2
+diffusers==0.25.0
+einops==0.7.0
+bitsandbytes==0.39.0
+scipy==1.11.1
+opencv-python
+gradio==4.24.0
+fvcore
+cloudpickle
+omegaconf
+pycocotools
+basicsr
+av
+onnxruntime==1.16.2
+
+# xformers==0.0.22
+# tensorboard
+# deepspeed
+# lpips
+# fire
+# pip install xformers==0.0.22 tensorboard deepspeed lpips fire
+# pip install torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu117
+
+

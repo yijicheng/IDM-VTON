@@ -453,14 +453,28 @@ def main():
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    test_dataset = DresscodeTestDataset(
+    upper_test_dataset = DresscodeTestDataset(
         dataroot_path=args.data_dir,
         phase="test",
         order="unpaired" if args.unpaired else "paired",
-        category = args.category,
+        category = "upper_body",
         size=(args.height, args.width),
     )
-    test_dataloader = torch.utils.data.DataLoader(
+    upper_test_dataloader = torch.utils.data.DataLoader(
+        test_dataset,
+        shuffle=False,
+        batch_size=args.test_batch_size,
+        num_workers=4,
+    )
+
+    lower_test_dataset = DresscodeTestDataset(
+        dataroot_path=args.data_dir,
+        phase="test",
+        order="unpaired" if args.unpaired else "paired",
+        category = "lower_body",
+        size=(args.height, args.width),
+    )
+    lower_test_dataloader = torch.utils.data.DataLoader(
         test_dataset,
         shuffle=False,
         batch_size=args.test_batch_size,
@@ -492,38 +506,16 @@ def main():
         # Extract the images
         with torch.cuda.amp.autocast():
             with torch.no_grad():
-                for sample in test_dataloader:
-                    img_emb_list = []
-                    for i in range(sample['cloth'].shape[0]):
-                        img_emb_list.append(sample['cloth'][i])
-                    
-                    prompt = sample["caption"]
+                for upper_sample, lower_sample in zip(upper_test_dataloader, lower_test_dataloader):
 
-                    num_prompts = sample['cloth'].shape[0]                                        
-                    negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+                    def _run_pipe(sample):
+                        img_emb_list = []
+                        for i in range(sample['cloth'].shape[0]):
+                            img_emb_list.append(sample['cloth'][i])
+                        
+                        prompt = sample["caption"]
 
-                    if not isinstance(prompt, List):
-                        prompt = [prompt] * num_prompts
-                    if not isinstance(negative_prompt, List):
-                        negative_prompt = [negative_prompt] * num_prompts
-
-                    image_embeds = torch.cat(img_emb_list,dim=0)
-
-                    with torch.inference_mode():
-                        (
-                            prompt_embeds,
-                            negative_prompt_embeds,
-                            pooled_prompt_embeds,
-                            negative_pooled_prompt_embeds,
-                        ) = pipe.encode_prompt(
-                            prompt,
-                            num_images_per_prompt=1,
-                            do_classifier_free_guidance=True,
-                            negative_prompt=negative_prompt,
-                        )
-                    
-                    
-                        prompt = sample["caption_cloth"]
+                        num_prompts = sample['cloth'].shape[0]                                        
                         negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
 
                         if not isinstance(prompt, List):
@@ -531,50 +523,82 @@ def main():
                         if not isinstance(negative_prompt, List):
                             negative_prompt = [negative_prompt] * num_prompts
 
+                        image_embeds = torch.cat(img_emb_list,dim=0)
 
                         with torch.inference_mode():
                             (
-                                prompt_embeds_c,
-                                _,
-                                _,
-                                _,
+                                prompt_embeds,
+                                negative_prompt_embeds,
+                                pooled_prompt_embeds,
+                                negative_pooled_prompt_embeds,
                             ) = pipe.encode_prompt(
                                 prompt,
                                 num_images_per_prompt=1,
-                                do_classifier_free_guidance=False,
+                                do_classifier_free_guidance=True,
                                 negative_prompt=negative_prompt,
                             )
                         
+                        
+                            prompt = sample["caption_cloth"]
+                            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+
+                            if not isinstance(prompt, List):
+                                prompt = [prompt] * num_prompts
+                            if not isinstance(negative_prompt, List):
+                                negative_prompt = [negative_prompt] * num_prompts
 
 
-                        generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
-                        images = pipe(
-                            prompt_embeds=prompt_embeds,
-                            negative_prompt_embeds=negative_prompt_embeds,
-                            pooled_prompt_embeds=pooled_prompt_embeds,
-                            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                            num_inference_steps=args.num_inference_steps,
-                            generator=generator,
-                            strength = 1.0,
-                            pose_img = sample['pose_img'],
-                            text_embeds_cloth=prompt_embeds_c,
-                            cloth = sample["cloth_pure"].to(accelerator.device),
-                            mask_image=sample['inpaint_mask'],
-                            image=(sample['image']+1.0)/2.0, 
-                            height=args.height,
-                            width=args.width,
-                            guidance_scale=args.guidance_scale,
-                            ip_adapter_image = image_embeds,
-                        )[0]
+                            with torch.inference_mode():
+                                (
+                                    prompt_embeds_c,
+                                    _,
+                                    _,
+                                    _,
+                                ) = pipe.encode_prompt(
+                                    prompt,
+                                    num_images_per_prompt=1,
+                                    do_classifier_free_guidance=False,
+                                    negative_prompt=negative_prompt,
+                                )
+                            
+
+
+                            generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
+                            images = pipe(
+                                prompt_embeds=prompt_embeds,
+                                negative_prompt_embeds=negative_prompt_embeds,
+                                pooled_prompt_embeds=pooled_prompt_embeds,
+                                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                                num_inference_steps=args.num_inference_steps,
+                                generator=generator,
+                                strength = 1.0,
+                                pose_img = sample['pose_img'],
+                                text_embeds_cloth=prompt_embeds_c,
+                                cloth = sample["cloth_pure"].to(accelerator.device),
+                                mask_image=sample['inpaint_mask'],
+                                image=(sample['image']+1.0)/2.0, 
+                                height=args.height,
+                                width=args.width,
+                                guidance_scale=args.guidance_scale,
+                                ip_adapter_image = image_embeds,
+                            )[0]
+
+                    upper_images = _run_pipe(upper_sample)
+                    for i, upper_image in enumerate(upper_images):
+                        lower_sample["image"] = (pil_to_tensor(upper_image) * 2) - 1
+                    images = _run_pipe(lower_sample)
 
 
                     for i in range(len(images)):
+                        upper_sample = pil_to_tensor(upper_images[i])
                         x_sample = pil_to_tensor(images[i])
                         if not args.unpaired:
-                            gt_sample = Image.open(os.path.join(args.data_dir, args.category, "images", sample['im_name'][i])).convert("RGB")
-                            gt_sample = pil_to_tensor(gt_sample)
-                            x_sample = torch.cat([gt_sample, x_sample], dim=2)
-                        torchvision.utils.save_image(x_sample,os.path.join(args.output_dir,sample['im_name'][i]))
+                            gt_upper_sample = Image.open(os.path.join(args.data_dir, args.category, "images", upper_sample['im_name'][i])).convert("RGB")
+                            gt_lower_sample = Image.open(os.path.join(args.data_dir, args.category, "images", lower_sample['im_name'][i])).convert("RGB")
+                            gt_upper_sample = pil_to_tensor(gt_upper_sample)
+                            gt_lower_sample = pil_to_tensor(gt_lower_sample)
+                            x_sample = torch.cat([gt_upper_sample, gt_lower_sample, upper_sample, x_sample], dim=2)
+                        torchvision.utils.save_image(x_sample,os.path.join(args.output_dir, f"{upper_sample['im_name'][i]}_{lower_sample['im_name'][i]}"))
                 
 
 
