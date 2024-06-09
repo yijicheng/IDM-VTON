@@ -89,6 +89,7 @@ from src.unet_hacked_tryon import UNet2DConditionModel
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
 from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 
+import time
 
 MAX_SEQ_LENGTH = 77
 
@@ -100,10 +101,55 @@ check_min_version("0.18.0.dev0")
 
 logger = get_logger(__name__)
 
+
+def load_embedding_model(args):
+    # Load the tokenizers
+    tokenizer_one = AutoTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, use_fast=False
+    )
+    tokenizer_two = AutoTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="tokenizer_2", revision=args.revision, use_fast=False
+    )
+
+    # import correct text encoder classes
+    text_encoder_cls_one = import_model_class_from_model_name_or_path(
+        args.pretrained_model_name_or_path, args.revision
+    )
+    text_encoder_cls_two = import_model_class_from_model_name_or_path(
+        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
+    )
+
+    text_encoder_one = text_encoder_cls_one.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+    )
+    text_encoder_two = text_encoder_cls_two.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
+    )
+    vae_path = (
+        args.pretrained_model_name_or_path
+        if args.pretrained_vae_model_name_or_path is None
+        else args.pretrained_vae_model_name_or_path
+    )
+    vae = AutoencoderKL.from_pretrained(
+        vae_path,
+        subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+        revision=args.revision,
+    )
+    image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="image_encoder",
+    )
+
+    return tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder
+
+
 def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one, tokenizer_two,
                    noise_scheduler, image_encoder, unet_encoder, sample,
                    args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
+
+    if args.use_cache_embedding:
+        tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder = load_embedding_model(args)
 
     unet = accelerator.unwrap_model(unet)
     pipeline = TryonPipeline.from_pretrained(
@@ -662,6 +708,8 @@ def parse_args(input_args=None):
     parser.add_argument("--unpaired",action="store_true",)
     parser.add_argument("--num_inference_steps",type=int,default=30,)
     parser.add_argument("--guidance_scale",type=float,default=2.0,)
+    parser.add_argument("--use_cache_embedding",action="store_true",)
+    parser.add_argument("--cache_embedding_dir",type=str)
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -736,7 +784,7 @@ def main(args):
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
-        split_batches=True,  # It's important to set this to True when using webdataset to get the right number of steps for lr scheduling. If set to False, the number of steps will be devide by the number of processes assuming batches are multiplied by the number of processes
+        # split_batches=True,  # It's important to set this to True when using webdataset to get the right number of steps for lr scheduling. If set to False, the number of steps will be devide by the number of processes assuming batches are multiplied by the number of processes
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -770,22 +818,6 @@ def main(args):
                 private=True,
             ).repo_id
 
-    # Load the tokenizers
-    tokenizer_one = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, use_fast=False
-    )
-    tokenizer_two = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer_2", revision=args.revision, use_fast=False
-    )
-
-    # import correct text encoder classes
-    text_encoder_cls_one = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision
-    )
-    text_encoder_cls_two = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
-    )
-
     # Load scheduler and models
     if args.use_euler:
         noise_scheduler = EulerDiscreteScheduler.from_pretrained(
@@ -814,27 +846,11 @@ def main(args):
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
-        text_encoder_one = text_encoder_cls_one.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
-        )
-        text_encoder_two = text_encoder_cls_two.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
-        )
-        vae_path = (
-            args.pretrained_model_name_or_path
-            if args.pretrained_vae_model_name_or_path is None
-            else args.pretrained_vae_model_name_or_path
-        )
-        vae = AutoencoderKL.from_pretrained(
-            vae_path,
-            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-            revision=args.revision,
-        )
+        if not args.use_cache_embedding:
+            tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder = load_embedding_model(args)
+        else:
+            tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder = None, None, None, None, None, None
 
-        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="image_encoder",
-        )
         unet_encoder = UNet2DConditionModel_ref.from_pretrained(
             args.pretrained_model_name_or_path,
             subfolder="unet_encoder",
@@ -907,11 +923,12 @@ def main(args):
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     unet.train()
-    vae.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
+    if not args.use_cache_embedding:
+        vae.requires_grad_(False)
+        text_encoder_one.requires_grad_(False)
+        text_encoder_two.requires_grad_(False)
+        image_encoder.requires_grad_(False)
     unet_encoder.requires_grad_(False)
-    image_encoder.requires_grad_(False)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -986,30 +1003,26 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Move vae, unet and text_encoder to device and cast to weight_dtype
-    # The VAE is in float32 to avoid NaN losses.
-    if args.pretrained_vae_model_name_or_path is not None:
-        vae.to(accelerator.device, dtype=weight_dtype)
-    else:
-        vae.to(accelerator.device, dtype=torch.float32)
-    text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    if not args.use_cache_embedding:
+        # Move vae, unet and text_encoder to device and cast to weight_dtype
+        # The VAE is in float32 to avoid NaN losses.
+        if args.pretrained_vae_model_name_or_path is not None:
+            vae.to(accelerator.device, dtype=weight_dtype)
+        else:
+            vae.to(accelerator.device, dtype=torch.float32)
+        text_encoder_one.to(accelerator.device, dtype=weight_dtype)
+        text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+        image_encoder.to(accelerator.device, dtype=weight_dtype)
     unet_encoder.to(accelerator.device, dtype=weight_dtype)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
-
-    logger.info(f"Trainable unet: {sum(p.numel() for p in unet.parameters() if p.requires_grad) / 1e06} M")
-    logger.info(f"Trainable vae: {sum(p.numel() for p in vae.parameters() if p.requires_grad) / 1e06} M")
-    logger.info(f"Trainable text_encoder_one: {sum(p.numel() for p in text_encoder_one.parameters() if p.requires_grad) / 1e06} M")
-    logger.info(f"Trainable text_encoder_two: {sum(p.numel() for p in text_encoder_two.parameters() if p.requires_grad) / 1e06} M")
-    logger.info(f"Trainable unet_encoder: {sum(p.numel() for p in unet_encoder.parameters() if p.requires_grad) / 1e06} M")
-    logger.info(f"Trainable image_encoder: {sum(p.numel() for p in image_encoder.parameters() if p.requires_grad) / 1e06} M")
     
-    logger.info(f"All unet: {sum(p.numel() for p in unet.parameters()) / 1e06} M")
-    logger.info(f"All vae: {sum(p.numel() for p in vae.parameters()) / 1e06} M")
-    logger.info(f"All text_encoder_one: {sum(p.numel() for p in text_encoder_one.parameters()) / 1e06} M")
-    logger.info(f"All text_encoder_two: {sum(p.numel() for p in text_encoder_two.parameters()) / 1e06} M")
-    logger.info(f"All unet_encoder: {sum(p.numel() for p in unet_encoder.parameters()) / 1e06} M")
-    logger.info(f"All image_encoder: {sum(p.numel() for p in image_encoder.parameters()) / 1e06} M")
+
+    logger.info(f"Trainable/All unet: {sum(p.numel() for p in unet.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in unet.parameters()) / 1e06} M")
+    if not args.use_cache_embedding:
+        logger.info(f"Trainable/All vae: {sum(p.numel() for p in vae.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in text_encoder_one.parameters()) / 1e06} M")
+        logger.info(f"Trainable/All text_encoder_one: {sum(p.numel() for p in text_encoder_one.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in text_encoder_one.parameters()) / 1e06} M")
+        logger.info(f"Trainable/All text_encoder_two: {sum(p.numel() for p in text_encoder_two.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in text_encoder_two.parameters()) / 1e06} M")
+        logger.info(f"Trainable/All image_encoder: {sum(p.numel() for p in image_encoder.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in image_encoder.parameters()) / 1e06} M")
+    logger.info(f"Trainable/All unet_encoder: {sum(p.numel() for p in unet_encoder.parameters() if p.requires_grad) / 1e06} M / {sum(p.numel() for p in unet_encoder.parameters()) / 1e06} M")
 
     # Here, we compute not just the text embeddings but also the additional embeddings
     # needed for the SD XL UNet to operate.
@@ -1066,6 +1079,8 @@ def main(args):
         phase="train",
         category = args.category,
         size=(args.height, args.width),
+        cache_embedding_dir=args.cache_embedding_dir,
+        use_cache_embedding=args.use_cache_embedding
     )
     train_dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -1091,17 +1106,18 @@ def main(args):
         )
         sample = next(iter(validation_dataloader))
 
-    # Let's first compute all the embeddings so that we can free up the text encoders
-    # from memory.
-    text_encoders = [text_encoder_one, text_encoder_two]
-    tokenizers = [tokenizer_one, tokenizer_two]
+    if not args.use_cache_embedding:
+        # Let's first compute all the embeddings so that we can free up the text encoders
+        # from memory.
+        text_encoders = [text_encoder_one, text_encoder_two]
+        tokenizers = [tokenizer_one, tokenizer_two]
 
-    compute_embeddings_fn = functools.partial(
-        compute_embeddings,
-        proportion_empty_prompts=args.proportion_empty_prompts,
-        text_encoders=text_encoders,
-        tokenizers=tokenizers,
-    )
+        compute_embeddings_fn = functools.partial(
+            compute_embeddings,
+            proportion_empty_prompts=args.proportion_empty_prompts,
+            text_encoders=text_encoders,
+            tokenizers=tokenizers,
+        )
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -1146,9 +1162,7 @@ def main(args):
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     # Train!
-    # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    # dataloader prepared by accelerator
-    total_batch_size = args.train_batch_size * args.gradient_accumulation_steps
+    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(dataset)}")
@@ -1198,6 +1212,11 @@ def main(args):
 
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
+        # data_iter = iter(train_dataloader)
+        # for step in range(len(train_dataloader)):
+        #     # s = time.time()
+        #     batch = next(data_iter)
+        #     # logger.info(f"data iterated: {time.time() - s}")
             with accelerator.accumulate(unet):
                 
                 image = batch['image'].to(accelerator.device, non_blocking=True) # [-1, 1]
@@ -1211,55 +1230,75 @@ def main(args):
                 prompt_model = batch["caption"]
                 prompt_cloth = batch["caption_cloth"]
 
-                added_cond_kwargs = compute_embeddings_fn(prompt_model, prompt_cloth, original_sizes=[[image.shape[2]]*image.shape[0], [image.shape[3]]*image.shape[0]], crop_coords=[[0]*image.shape[0], [0]*image.shape[0]])
+                bsz = image.shape[0]
+                if not args.use_cache_embedding:
 
-                if args.pretrained_vae_model_name_or_path is not None:
-                    pixel_values = image.to(dtype=weight_dtype)
-                    masked_pixel_values = masked_image.to(dtype=weight_dtype)
-                    pose_pixel_values = pose_image.to(dtype=weight_dtype)
-                    cloth_pixel_values = cloth_image.to(dtype=weight_dtype)
-                    if vae.dtype != weight_dtype:
-                        vae.to(dtype=weight_dtype)
+                    # s = time.time()
+                    added_cond_kwargs = compute_embeddings_fn(prompt_model, prompt_cloth, original_sizes=[[image.shape[2]]*bsz, [image.shape[3]]*bsz], crop_coords=[[0]*bsz, [0]*bsz])
+
+                    if args.pretrained_vae_model_name_or_path is not None:
+                        pixel_values = image.to(dtype=weight_dtype)
+                        masked_pixel_values = masked_image.to(dtype=weight_dtype)
+                        pose_pixel_values = pose_image.to(dtype=weight_dtype)
+                        cloth_pixel_values = cloth_image.to(dtype=weight_dtype)
+                        if vae.dtype != weight_dtype:
+                            vae.to(dtype=weight_dtype)
+                    else:
+                        pixel_values = image
+                        masked_pixel_values = masked_image
+                        pose_pixel_values = pose_image
+                        cloth_pixel_values = cloth_image
+
+                    # encode pixel values with batch size of at most 8
+                    latents = []
+                    for i in range(0, pixel_values.shape[0], 8):
+                        latents.append(vae.encode(pixel_values[i : i + 8]).latent_dist.sample())
+                    latents = torch.cat(latents, dim=0)
+
+                    masked_latents = []
+                    for i in range(0, masked_pixel_values.shape[0], 8):
+                        masked_latents.append(vae.encode(masked_pixel_values[i : i + 8]).latent_dist.sample())
+                    masked_latents = torch.cat(masked_latents, dim=0)
+
+                    pose_latents = []
+                    for i in range(0, pose_pixel_values.shape[0], 8):
+                        pose_latents.append(vae.encode(pose_pixel_values[i : i + 8]).latent_dist.sample())
+                    pose_latents = torch.cat(pose_latents, dim=0)
+
+                    cloth_latents = []
+                    for i in range(0, cloth_pixel_values.shape[0], 8):
+                        cloth_latents.append(vae.encode(cloth_pixel_values[i : i + 8]).latent_dist.sample())
+                    cloth_latents = torch.cat(cloth_latents, dim=0)
+
+                    latents = latents * vae.config.scaling_factor
+                    masked_latents = masked_latents * vae.config.scaling_factor
+                    pose_latents = pose_latents * vae.config.scaling_factor
+                    cloth_latents = cloth_latents * vae.config.scaling_factor
+                    if args.pretrained_vae_model_name_or_path is None:
+                        latents = latents.to(weight_dtype)
+                        masked_latents = masked_latents.to(weight_dtype)
+                        pose_latents = pose_latents.to(weight_dtype)
+                        cloth_latents = cloth_latents.to(weight_dtype)
+
+                    vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
                 else:
-                    pixel_values = image
-                    masked_pixel_values = masked_image
-                    pose_pixel_values = pose_image
-                    cloth_pixel_values = cloth_image
+                    cache_embedding_dict = batch["cache_emebdding_dict"]
 
-                # encode pixel values with batch size of at most 8
-                latents = []
-                for i in range(0, pixel_values.shape[0], 8):
-                    latents.append(vae.encode(pixel_values[i : i + 8]).latent_dist.sample())
-                latents = torch.cat(latents, dim=0)
+                    added_cond_kwargs = dict(
+                        prompt_embeds=cache_embedding_dict["prompt_embeds"].to(accelerator.device, weight_dtype),
+                        prompt_embeds_cloth=cache_embedding_dict["prompt_embeds_cloth"].to(accelerator.device, weight_dtype),
+                        text_embeds=cache_embedding_dict["text_embeds"].to(accelerator.device, weight_dtype),
+                        time_ids=cache_embedding_dict["time_ids"].to(accelerator.device, weight_dtype),
+                    )
 
-                masked_latents = []
-                for i in range(0, masked_pixel_values.shape[0], 8):
-                    masked_latents.append(vae.encode(masked_pixel_values[i : i + 8]).latent_dist.sample())
-                masked_latents = torch.cat(masked_latents, dim=0)
+                    latents = cache_embedding_dict["latents"].to(accelerator.device, weight_dtype)
+                    masked_latents = cache_embedding_dict["masked_latents"].to(accelerator.device, weight_dtype)
+                    pose_latents = cache_embedding_dict["pose_latents"].to(accelerator.device, weight_dtype)
+                    cloth_latents = cache_embedding_dict["cloth_latents"].to(accelerator.device, weight_dtype)
 
-                pose_latents = []
-                for i in range(0, pose_pixel_values.shape[0], 8):
-                    pose_latents.append(vae.encode(pose_pixel_values[i : i + 8]).latent_dist.sample())
-                pose_latents = torch.cat(pose_latents, dim=0)
-
-                cloth_latents = []
-                for i in range(0, cloth_pixel_values.shape[0], 8):
-                    cloth_latents.append(vae.encode(cloth_pixel_values[i : i + 8]).latent_dist.sample())
-                cloth_latents = torch.cat(cloth_latents, dim=0)
-
-
-                latents = latents * vae.config.scaling_factor
-                masked_latents = masked_latents * vae.config.scaling_factor
-                pose_latents = pose_latents * vae.config.scaling_factor
-                cloth_latents = cloth_latents * vae.config.scaling_factor
-                if args.pretrained_vae_model_name_or_path is None:
-                    latents = latents.to(weight_dtype)
-                    masked_latents = masked_latents.to(weight_dtype)
-                    pose_latents = pose_latents.to(weight_dtype)
-                    cloth_latents = cloth_latents.to(weight_dtype)
+                    vae_scale_factor = 8
 
                 # scale mask to match latents resolution
-                vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
                 latent_dimension_height = args.height // vae_scale_factor
                 latent_dimension_width = args.width // vae_scale_factor
                 mask = F.interpolate(mask.to(torch.float32), size=(latent_dimension_height, latent_dimension_width))
@@ -1267,7 +1306,7 @@ def main(args):
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
+                # bsz = latents.shape[0]
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
@@ -1289,7 +1328,7 @@ def main(args):
 
                 # GarmentNet
                 prompt_embeds_cloth = added_cond_kwargs.pop("prompt_embeds_cloth")
-                down, reference_features = unet_encoder(cloth_latents, timesteps, prompt_embeds_cloth, return_dict=False)
+                _, reference_features = unet_encoder(cloth_latents, timesteps, prompt_embeds_cloth, return_dict=False)
                 # Conditioning dropout to support classifier-free guidance during inference. For more details
                 # check out the section 3.2.1 of the original paper https://arxiv.org/abs/2211.09800.
                 if args.proportion_empty_prompts is not None:
@@ -1300,15 +1339,22 @@ def main(args):
 
                 # IP-Adapter
                 output_hidden_state = not isinstance(unet.module.encoder_hid_proj, ImageProjection)
-                if output_hidden_state:
-                    image_embeds_cloth = image_encoder(cloth_clip_image, output_hidden_states=True).hidden_states[-2]
+                if not args.use_cache_embedding:
+                    if output_hidden_state:
+                        image_embeds_cloth = image_encoder(cloth_clip_image, output_hidden_states=True).hidden_states[-2]
+                    else:
+                        image_embeds_cloth = image_encoder(cloth_clip_image).image_embeds
                 else:
-                    image_embeds_cloth = image_encoder(cloth_clip_image).image_embeds
+                    assert output_hidden_state
+                    image_embeds_cloth = cache_embedding_dict["image_embeds_cloth"].to(accelerator.device, weight_dtype)
 
-                # #project outside for loop
+                # # project outside for loop
                 # image_embeds_cloth = image_embeds_cloth.to(unet.dtype)
                 # image_embeds_cloth = unet.module.encoder_hid_proj(image_embeds_cloth).to(prompt_embeds_cloth.dtype)
                 added_cond_kwargs["image_embeds"] = image_embeds_cloth
+
+                # logger.info(f"latent prepared: {time.time() - s}")
+                # s = time.time()
 
                 # predict the noise residual
                 prompt_embeds = added_cond_kwargs.pop("prompt_embeds")
@@ -1319,6 +1365,9 @@ def main(args):
                     added_cond_kwargs=added_cond_kwargs,
                     garment_features=reference_features,
                 ).sample
+
+                # logger.info(f"unet forwarded: {time.time() - s}")
+                # s = time.time()
 
                 if args.use_euler:
                     model_pred = model_pred * (-sigmas) + noisy_latents
@@ -1342,6 +1391,8 @@ def main(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+                
+                # logger.info(f"loss backwarded: {time.time() - s}")
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1349,32 +1400,6 @@ def main(args):
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
-
-                # saved by deepspeed
-                if global_step % args.checkpointing_steps == 0:
-                    # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                    if args.checkpoints_total_limit is not None:
-                        checkpoints = os.listdir(args.output_dir)
-                        checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                        checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                        # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                        if len(checkpoints) >= args.checkpoints_total_limit:
-                            num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                            removing_checkpoints = checkpoints[0:num_to_remove]
-
-                            logger.info(
-                                f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                            )
-                            logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                            for removing_checkpoint in removing_checkpoints:
-                                removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                shutil.rmtree(removing_checkpoint)
-
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                    accelerator.save_state(save_path)
-                    logger.info(f"Saved state to {save_path}")
 
                 # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
                 if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
@@ -1434,19 +1459,19 @@ def main(args):
             ema_unet.copy_to(unet.parameters())
             unet.save_pretrained(os.path.join(args.output_dir, "unet_ema"))
 
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+        # if args.push_to_hub:
+        #     save_model_card(
+        #         repo_id,
+        #         image_logs=image_logs,
+        #         base_model=args.pretrained_model_name_or_path,
+        #         repo_folder=args.output_dir,
+        #     )
+        #     upload_folder(
+        #         repo_id=repo_id,
+        #         folder_path=args.output_dir,
+        #         commit_message="End of training",
+        #         ignore_patterns=["step_*", "epoch_*"],
+        #     )
 
     accelerator.end_training()
 

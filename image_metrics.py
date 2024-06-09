@@ -35,7 +35,7 @@ def main(
     exp_dir,
     num_samples=5,
 ):
-        batch_dir = sorted([x for x in sorted(os.listdir(os.path.join(exp_dir)))], key=lambda x: int(x.split("_")[0]))[:num_samples]
+        batch_dir = sorted([x for x in sorted(os.listdir(os.path.join(exp_dir))) if ".jpg" in x], key=lambda x: int(x.split("_")[0]))[:num_samples]
         print(batch_dir)
         sample = []
         target = []
@@ -48,8 +48,8 @@ def main(
             assert target[0].shape[2] == sample[0].shape[2]
             assert len(target) == len(sample)
 
-        target = torch.stack(target, 0)[None] # 1NCHW
-        sample = torch.stack(sample, 0)[None] # 1NCHW
+        target = torch.stack(target, 0)[:, None] # N1CHW
+        sample = torch.stack(sample, 0)[:, None] # N1CHW
         
         # result_psnr = calculate_psnr(sample, target)
         result_ssim = calculate_ssim(sample, target)
@@ -58,8 +58,8 @@ def main(
         meta = {}
         for i, batch in enumerate(batch_dir):
             meta[batch] = {
-                "SSIM": result_ssim["value"][i],
-                "LPIPS": result_lpips["value"][i],
+                "SSIM": result_ssim["results"][i][0],
+                "LPIPS": result_lpips["results"][i][0],
             }
 
         with open(os.path.join(exp_dir, "meta_results.json"), "w") as f:
@@ -68,8 +68,8 @@ def main(
         print("===================")
         print(f"[{exp_dir}]")
         # print(f"PSNR: {result_psnr['value']}")
-        print(f"SSIM: {np.mean(list(result_ssim['value'].values())):.3f}")
-        print(f"LPIPS: {np.mean(list(result_lpips['value'].values())):.3f}")
+        print(f"SSIM: {result_ssim['value'][0]:.3f}")
+        print(f"LPIPS: {result_lpips['value'][0]:.3f}")
         print("===================")
 
 if __name__ == '__main__':

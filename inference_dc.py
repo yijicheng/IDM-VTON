@@ -102,6 +102,8 @@ class DresscodeTestDataset(data.Dataset):
         order: Literal["paired", "unpaired"] = "paired",
         category = "upper_body",
         size: Tuple[int, int] = (512, 384),
+        cache_embedding_dir=None,
+        use_cache_embedding=False,
     ):
         super(DresscodeTestDataset, self).__init__()
         self.dataroot = os.path.join(dataroot_path,category)
@@ -121,6 +123,9 @@ class DresscodeTestDataset(data.Dataset):
         self.category = category
         im_names = []
         c_names = []
+
+        self.cache_embedding_dir = cache_embedding_dir
+        self.use_cache_embedding = use_cache_embedding
 
 
         if phase == "train":
@@ -219,6 +224,11 @@ class DresscodeTestDataset(data.Dataset):
         result["caption_cloth"] = "a photo of " + cloth_annotation
         result["caption"] = "model is wearing a " + cloth_annotation
         result["pose_img"] = pose_img
+
+        if self.use_cache_embedding and self.cache_embedding_dir is not None:
+            assert os.path.exists(os.path.join(self.cache_embedding_dir, self.category, f"im_{im_name}_c_{c_name}.pt")), \
+                os.path.join(self.cache_embedding_dir, self.category, f"im_{im_name}_c_{c_name}.pt")
+            result["cache_emebdding_dict"] = torch.load(os.path.join(self.cache_embedding_dir, self.category, f"im_{im_name}_c_{c_name}.pt"), map_location="cpu")
 
         return result
 
