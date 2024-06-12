@@ -317,9 +317,8 @@ print(human_list_path)
 
 ##default human
 for i in range(len(human_ex_list)):
-    # output_dir = os.path.join(f"outputs/{garm_ex_list[i].split('/')[-1]}/{human_ex_list[i]['background'].split('/')[-1]}")
+    output_dir = os.path.join(f"results_inference/{human_ex_list[i]['background'].split('/')[-1]}/{garm_ex_list[i].split('/')[-1]}")
 
-    output_dir = os.path.join(f"outputs/{garm_ex_list[i].split('/')[-1]}/{human_ex_list[i]['background'].split('/')[-3:]}")
     os.makedirs(output_dir, exist_ok=True)
     human_ex_list[i]['background'] = Image.open(human_ex_list[i]['background'])
     imgs=human_ex_list[i]

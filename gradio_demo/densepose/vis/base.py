@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import cv2
 import torch
-
+# import PIL
 Image = np.ndarray
 Boxes = torch.Tensor
 
@@ -55,7 +55,20 @@ class MatrixVisualizer:
         image_target_bgr[y : y + h, x : x + w, :] = (
             image_target_bgr[y : y + h, x : x + w, :] * (1.0 - self.alpha) + matrix_vis * self.alpha
         )
-        return image_target_bgr.astype(np.uint8)
+
+        # # import pdb; pdb.set_trace()
+        # image_matrix = np.zeros((image_target_bgr.shape[0], image_target_bgr.shape[1]), dtype=np.uint8)
+        # # np.savetxt('array.txt', matrix, fmt='%d', delimiter=',')
+        # image_matrix[y : y + h, x : x + w] = matrix
+        # # image_matrix_scaled = image_matrix.astype(np.float32) * self.val_scale
+        # # image_matrix_scaled_8u = image_matrix_scaled.clip(0, 255).astype(np.uint8)
+        # # PIL.Image.fromarray(image_matrix_scaled_8u).save("image_matrix_scaled_8u.png")
+        # # exit()
+
+        # # PIL.Image.fromarray(image_target_bgr[:, :, ::-1]).save("image_target_bgr.png")
+        # import pdb; pdb.set_trace()
+
+        return image_target_bgr.astype(np.uint8)# , image_matrix
 
     def _resize(self, mask, matrix, w, h):
         if (w != mask.shape[1]) or (h != mask.shape[0]):

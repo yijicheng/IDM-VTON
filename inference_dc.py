@@ -106,6 +106,7 @@ class DresscodeTestDataset(data.Dataset):
         use_cache_embedding=False,
     ):
         super(DresscodeTestDataset, self).__init__()
+        self.dataroot_path = dataroot_path
         self.dataroot = os.path.join(dataroot_path,category)
         self.phase = phase
         self.height = size[0]
@@ -156,12 +157,31 @@ class DresscodeTestDataset(data.Dataset):
     def __getitem__(self, index):
         c_name = self.c_names[index]
         im_name = self.im_names[index]
+
+        if self.phase == 'test':
+            if index % 4 == 0:
+                c_name = "013605_1.jpg"
+                im_name = "048451_0.jpg"
+            if index % 4 == 1:
+                c_name = "013614_1.jpg"
+                im_name = "048460_0.jpg"
+            if index % 4 == 2:
+                c_name = "013566_1.jpg"
+                im_name = "048409_0.jpg"
+            else:
+                c_name = "013574_1.jpg"
+                im_name = "048417_0.jpg"
+
         if c_name in self.annotation_pair:
             cloth_annotation = self.annotation_pair[c_name]
         else:
             cloth_annotation = self.category
+        if self.phase == 'test':
+            self.dataroot = os.path.join(self.dataroot_path, self.category)
         cloth = Image.open(os.path.join(self.dataroot, "images", c_name))
 
+        if self.phase == 'test':
+            self.dataroot = os.path.join(self.dataroot_path, "upper_body")
         im_pil_big = Image.open(
             os.path.join(self.dataroot, "images", im_name)
         ).resize((self.width,self.height))

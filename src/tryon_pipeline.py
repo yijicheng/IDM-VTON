@@ -1294,6 +1294,7 @@ class StableDiffusionXLInpaintPipeline(
         pooled_prompt_embeds_c=None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        pose_noise_aug = 0.0,
         **kwargs,
     ):
         r"""
@@ -1556,6 +1557,7 @@ class StableDiffusionXLInpaintPipeline(
             return isinstance(self.denoising_end, float) and 0 < dnv < 1
 
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        print(timesteps)
         timesteps, num_inference_steps = self.get_timesteps(
             num_inference_steps,
             strength,
@@ -1644,6 +1646,10 @@ class StableDiffusionXLInpaintPipeline(
         pose_img = pose_img * self.vae.config.scaling_factor
 
         # pose_img = self._encode_vae_image(pose_img, generator=generator)
+
+        if pose_noise_aug != 0.:
+            pose_noise = torch.randn_like(pose_img)
+            pose_img = pose_img + pose_noise_aug * pose_noise
 
         pose_img = (
                 torch.cat([pose_img] * 2) if self.do_classifier_free_guidance else pose_img

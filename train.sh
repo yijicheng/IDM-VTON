@@ -3,6 +3,7 @@
 
 export MODEL_NAME="/root/.cache/huggingface/hub/models--yisol--IDM-VTON/snapshots/585a32e74aee241cbc0d0cc3ab21392ca58c916a/"
 export UNET_NAME="/root/.cache/huggingface/hub/models--yisol--IDM-VTON-DC/snapshots/0fcf915a04a97a353678e2f17f89587127fce7f0/"
+# export UNET_NAME="/root/idm-vton-dc-lower-body-lr-1e-5-bsz-32-bf16/checkpoint-3000"
 export VAE_NAME="madebyollin/sdxl-vae-fp16-fix"
 export DATASET_PATH="../../data/ft_local/DressCode"
 
@@ -23,13 +24,15 @@ export DATASET_PATH="../../data/ft_local/DressCode"
     --mixed_precision="bf16" \
     --seed=42 \
     --report_to="tensorboard" \
-    --checkpointing_steps=5000 \
-    --validation_steps=5000 \
-    --output_dir="outputs/idm-vton-dc-lower-body-lr-1e-5-bsz-32-bf16" \
+    --checkpointing_steps=1000 --checkpoints_total_limit=100 \
+    --validation_steps=200 \
+    --output_dir="outputs/idm-vton-dc-lower-body-lr-1e-5-bsz-32-bf16-add_noise_t_to_densepose_latent" \
     --logging_dir="logs" \
     --tracker_project_name="sdxl-inpainting" \
     --category="lower_body" --unpaired \
-    --cache_embedding_dir="../../data/DressCode-cache-embedding" --use_cache_embedding
+    --cache_embedding_dir="../../data/DressCode-cache-embedding" --use_cache_embedding \
+    --densepose_aug_type="add_noise_t_to_densepose_latent" \
+    --resume_from_checkpoint=latest
 
 
 #   --enable_xformers_memory_efficient_attention \

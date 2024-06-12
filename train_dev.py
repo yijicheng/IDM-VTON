@@ -166,6 +166,11 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
         torch_dtype=torch.float16,
     )
     pipeline.unet_encoder = unet_encoder
+
+    if args.prediction_type is not None:
+        scheduler_args = {"prediction_type": args.prediction_type, "timestep_spacing": "trailing" if args.use_zero_snr else "leading"}
+        pipeline.scheduler = pipeline.scheduler.from_config(pipeline.scheduler.config, **scheduler_args)
+
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -251,6 +256,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                             width=args.width,
                             guidance_scale=args.guidance_scale,
                             ip_adapter_image=image_embeds,
+                            guidance_rescale=args.guidance_rescale if args.use_zero_snr else 0.0,
                         )[0]
                         for j in range(len(prompt_embeds)):
                             images[j].append(images_batch[j])
@@ -271,12 +277,22 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
         .numpy()
         .astype(np.uint8)
     )
+
+    pose_image = (
+        ((sample['pose_img']+1.0)/2.0 * 255.)
+        .permute(0, 2, 3, 1)
+        .cpu()
+        .numpy()
+        .astype(np.uint8)
+    )
+
     image_logs = []
     for i in range(len(images)):
         image_logs.append({
             "validation_image_model": Image.fromarray(model_image[i]).convert("RGB"), 
             "validation_image_masked": Image.fromarray(masked_image[i]).convert("RGB"), 
-            "validation_image_cloth": Image.fromarray(cloth_image[i]).convert("RGB"), 
+            "validation_image_cloth": Image.fromarray(cloth_image[i]).convert("RGB"),
+            "validation_image_pose": Image.fromarray(pose_image[i]).convert("RGB"), 
             "validation_prompt": f"batch_{i}: " + prompt[i],
             "images": images[i], 
         })
@@ -289,6 +305,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 validation_image_model = np.asarray(log["validation_image_model"])
                 validation_image_masked = np.asarray(log["validation_image_masked"])
                 validation_image_cloth = np.asarray(log["validation_image_cloth"])
+                validation_image_pose = np.asarray(log["validation_image_pose"])
                 images = np.asarray(log["images"])
 
                 formatted_images = []
@@ -296,6 +313,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 formatted_images.append(np.asarray(validation_image_model))
                 formatted_images.append(np.asarray(validation_image_masked))
                 formatted_images.append(np.asarray(validation_image_cloth))
+                formatted_images.append(np.asarray(validation_image_pose))
 
                 for image in images:
                     formatted_images.append(np.asarray(image))
@@ -312,10 +330,12 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 validation_image_model = log["validation_image_model"]
                 validation_image_masked = log["validation_image_masked"]
                 validation_image_cloth = log["validation_image_cloth"]
+                validation_image_pose = log["validation_image_pose"]
 
                 formatted_images.append(wandb.Image(validation_image_model, caption="adapter conditioning model"))
                 formatted_images.append(wandb.Image(validation_image_masked, caption="adapter conditioning model"))
                 formatted_images.append(wandb.Image(validation_image_cloth, caption="adapter conditioning cloth"))
+                formatted_images.append(wandb.Image(validation_image_pose, caption="adapter conditioning pose"))
 
                 for image in images:
                     image = wandb.Image(image, caption=validation_prompt)
@@ -325,7 +345,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
 
-        del pipeline
+        del pipeline, unet, tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -643,7 +663,7 @@ def parse_args(input_args=None):
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
-        "--validation_batch_size", type=int, default=2, help="Batch size (per device) for the validation dataloader."
+        "--validation_batch_size", type=int, default=4, help="Batch size (per device) for the validation dataloader."
     )
     parser.add_argument(
         "--validation_prompt",
@@ -704,12 +724,50 @@ def parse_args(input_args=None):
         default=False,
         help="Whether or not to use non-uniform timesteps.",
     )
-    parser.add_argument("--category",type=str,default="upper_body",choices=["upper_body", "lower_body", "dresses"])
-    parser.add_argument("--unpaired",action="store_true",)
-    parser.add_argument("--num_inference_steps",type=int,default=30,)
-    parser.add_argument("--guidance_scale",type=float,default=2.0,)
-    parser.add_argument("--use_cache_embedding",action="store_true",)
-    parser.add_argument("--cache_embedding_dir",type=str)
+    parser.add_argument(
+        "--category", 
+        type=str, 
+        default="upper_body",
+        choices=["upper_body", "lower_body", "dresses"],
+    )
+    parser.add_argument(
+        "--unpaired",
+        action="store_true", 
+        help="The data pair type for validation."
+    )
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=30,
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=2.0,
+    )
+    parser.add_argument(
+        "--use_cache_embedding",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--cache_embedding_dir",
+        type=str
+    )
+    parser.add_argument(
+        "--prediction_type",
+        type=str,
+        default=None,
+        help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
+    )
+    parser.add_argument(
+        "--use_zero_snr",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--guidance_rescale",
+        type=float,
+        default=0.7,
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -729,7 +787,8 @@ def parse_args(input_args=None):
         raise ValueError(
             "`--height/width` must be divisible by 8 for consistently sized encoded images between the VAE and the unet."
         )
-
+    # if args.use_zero_snr and args.prediction_type != 'v_prediction':
+    #     raise ValueError("`--prediction_type` must be 'v_prediction' if `--use_zero_snr` is set")
     return args
 
 
@@ -889,17 +948,16 @@ def main(args):
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                if args.use_ema:
-                    ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
+            if args.use_ema:
+                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
-                for i, model in enumerate(models):
-                    logger.info({"class_name": model.__class__.__name__})
-                    model.save_pretrained(os.path.join(output_dir, "unet"))
+            for i, model in enumerate(models):
+                logger.info({"class_name": model.__class__.__name__})
+                model.save_pretrained(os.path.join(output_dir, "unet"))
 
-                    # make sure to pop weight so that corresponding model is not saved again
-                    if weights:
-                        weights.pop()
+                # make sure to pop weight so that corresponding model is not saved again
+                if weights:
+                    weights.pop()
 
         def load_model_hook(models, input_dir):
             if args.use_ema:
@@ -1369,12 +1427,30 @@ def main(args):
                 # logger.info(f"unet forwarded: {time.time() - s}")
                 # s = time.time()
 
-                if args.use_euler:
-                    model_pred = model_pred * (-sigmas) + noisy_latents
-                    weighing = sigmas**-2.0
-
                 # Get the target for loss depending on the prediction type
-                target = latents if args.use_euler else noise
+                if args.prediction_type is not None:
+                    # set prediction_type of scheduler if defined
+                    noise_scheduler.register_to_config(prediction_type=args.prediction_type)
+                else:
+                    if args.use_euler:
+                        model_pred = model_pred * (-sigmas) + noisy_latents
+                        weighing = sigmas**-2.0
+
+                    # Get the target for loss depending on the prediction type
+                    target = latents if args.use_euler else noise
+
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                elif noise_scheduler.config.prediction_type == "sample":
+                    # We set the target to latents here, but the model_pred will return the noise sample prediction.
+                    target = latents
+                    # We will have to subtract the noise residual from the prediction to get the target sample.
+                    model_pred = model_pred - noise
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
 
                 if args.use_euler:
                     loss = torch.mean(
@@ -1422,7 +1498,8 @@ def main(args):
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                                    if os.path.exists(removing_checkpoint):
+                                        shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
@@ -1459,6 +1536,10 @@ def main(args):
             ema_unet.copy_to(unet.parameters())
             unet.save_pretrained(os.path.join(args.output_dir, "unet_ema"))
 
+        if args.prediction_type is not None:
+            scheduler_args = {"prediction_type": args.prediction_type, "timestep_spacing": "trailing" if args.use_zero_snr else "leading"}
+            noise_scheduler = noise_scheduler.from_config(noise_scheduler.config, **scheduler_args)
+            noise_scheduler.save_pretrained(os.path.join(args.output_dir, "scheduler"))
         # if args.push_to_hub:
         #     save_model_card(
         #         repo_id,

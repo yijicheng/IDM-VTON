@@ -23,13 +23,15 @@ export DATASET_PATH="../../data/ft_local/DressCode"
     --mixed_precision="bf16" \
     --seed=42 \
     --report_to="tensorboard" \
-    --checkpointing_steps=5000 \
-    --validation_steps=5000 \
-    --output_dir="outputs/idm-vton-dc-lower-body-lr-1e-5-bsz-32-bf16-dev" \
+    --checkpointing_steps=1000 --checkpoints_total_limit=100 \
+    --validation_steps=200 \
+    --output_dir="outputs/idm-vton-dc-lower-body-lr-1e-5-bsz-32-bf16-v-prediction-zero-snr-dev" \
     --logging_dir="logs" \
     --tracker_project_name="sdxl-inpainting" \
     --category="lower_body" --unpaired \
-    --cache_embedding_dir="../../data/DressCode-cache-embedding" --use_cache_embedding
+    --cache_embedding_dir="../../data/DressCode-cache-embedding" --use_cache_embedding \
+    --prediction_type='v_prediction' --use_zero_snr \
+    --resume_from_checkpoint=latest
 
 
 #   --enable_xformers_memory_efficient_attention \

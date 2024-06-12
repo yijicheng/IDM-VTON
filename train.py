@@ -271,12 +271,22 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
         .numpy()
         .astype(np.uint8)
     )
+
+    pose_image = (
+        ((sample['pose_img']+1.0)/2.0 * 255.)
+        .permute(0, 2, 3, 1)
+        .cpu()
+        .numpy()
+        .astype(np.uint8)
+    )
+
     image_logs = []
     for i in range(len(images)):
         image_logs.append({
             "validation_image_model": Image.fromarray(model_image[i]).convert("RGB"), 
             "validation_image_masked": Image.fromarray(masked_image[i]).convert("RGB"), 
-            "validation_image_cloth": Image.fromarray(cloth_image[i]).convert("RGB"), 
+            "validation_image_cloth": Image.fromarray(cloth_image[i]).convert("RGB"),
+            "validation_image_pose": Image.fromarray(pose_image[i]).convert("RGB"), 
             "validation_prompt": f"batch_{i}: " + prompt[i],
             "images": images[i], 
         })
@@ -289,6 +299,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 validation_image_model = np.asarray(log["validation_image_model"])
                 validation_image_masked = np.asarray(log["validation_image_masked"])
                 validation_image_cloth = np.asarray(log["validation_image_cloth"])
+                validation_image_pose = np.asarray(log["validation_image_pose"])
                 images = np.asarray(log["images"])
 
                 formatted_images = []
@@ -296,6 +307,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 formatted_images.append(np.asarray(validation_image_model))
                 formatted_images.append(np.asarray(validation_image_masked))
                 formatted_images.append(np.asarray(validation_image_cloth))
+                formatted_images.append(np.asarray(validation_image_pose))
 
                 for image in images:
                     formatted_images.append(np.asarray(image))
@@ -312,10 +324,12 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
                 validation_image_model = log["validation_image_model"]
                 validation_image_masked = log["validation_image_masked"]
                 validation_image_cloth = log["validation_image_cloth"]
+                validation_image_pose = log["validation_image_pose"]
 
                 formatted_images.append(wandb.Image(validation_image_model, caption="adapter conditioning model"))
                 formatted_images.append(wandb.Image(validation_image_masked, caption="adapter conditioning model"))
                 formatted_images.append(wandb.Image(validation_image_cloth, caption="adapter conditioning cloth"))
+                formatted_images.append(wandb.Image(validation_image_pose, caption="adapter conditioning pose"))
 
                 for image in images:
                     image = wandb.Image(image, caption=validation_prompt)
@@ -325,7 +339,7 @@ def log_validation(vae, unet, text_encoder_one, text_encoder_two, tokenizer_one,
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
 
-        del pipeline
+        del pipeline, unet, tokenizer_one, tokenizer_two, text_encoder_one, text_encoder_two, vae, image_encoder
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -643,7 +657,7 @@ def parse_args(input_args=None):
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
-        "--validation_batch_size", type=int, default=2, help="Batch size (per device) for the validation dataloader."
+        "--validation_batch_size", type=int, default=4, help="Batch size (per device) for the validation dataloader."
     )
     parser.add_argument(
         "--validation_prompt",
@@ -710,6 +724,7 @@ def parse_args(input_args=None):
     parser.add_argument("--guidance_scale",type=float,default=2.0,)
     parser.add_argument("--use_cache_embedding",action="store_true",)
     parser.add_argument("--cache_embedding_dir",type=str)
+    parser.add_argument("--densepose_aug_type",type=str,default=None,choices=["add_noise_t_to_densepose_latent", "add_noise_gaussian_to_densepose_latent",])
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -889,17 +904,16 @@ def main(args):
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                if args.use_ema:
-                    ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
+            if args.use_ema:
+                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
-                for i, model in enumerate(models):
-                    logger.info({"class_name": model.__class__.__name__})
-                    model.save_pretrained(os.path.join(output_dir, "unet"))
+            for i, model in enumerate(models):
+                logger.info({"class_name": model.__class__.__name__})
+                model.save_pretrained(os.path.join(output_dir, "unet"))
 
-                    # make sure to pop weight so that corresponding model is not saved again
-                    if weights:
-                        weights.pop()
+                # make sure to pop weight so that corresponding model is not saved again
+                if weights:
+                    weights.pop()
 
         def load_model_hook(models, input_dir):
             if args.use_ema:
@@ -1318,6 +1332,14 @@ def main(args):
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
+                # Add noise to densepose image to prevent densepose dominate
+                if args.densepose_aug_type == "add_noise_t_to_densepose_latent":
+                    pose_noise = torch.randn_like(pose_latents)
+                    pose_latents = noise_scheduler.add_noise(pose_latents, pose_noise, timesteps)
+                # elif args.densepose_aug_type == "add_noise_gaussian_to_densepose_latent":
+                #     pose_noise = torch.randn_like(pose_latents)
+                #     pose_latents = pose_latents + pose_noise
+
                 if args.use_euler:
                     sigmas = get_sigmas(timesteps, len(noisy_latents.shape), noisy_latents.dtype)
                     inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
@@ -1422,7 +1444,8 @@ def main(args):
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                                    if os.path.exists(removing_checkpoint):
+                                        shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)

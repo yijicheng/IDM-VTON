@@ -21,6 +21,29 @@ label_map = {
     "right_arm": 15,
     "bag": 16,
     "scarf": 17,
+    "neck": 18,
+}
+
+densepose_map = {
+    "right_face": 244,
+    "left_face": 255,
+    "right_right_upper_arm": 191,
+    "right_upper_arm": 170,
+    "lef_upper_arm": 159,
+    "left_left_upper_arm": 180,
+    "right_right_lower_arm": 233,
+    "right_lower_arm": 212,
+    "left_lower_arm": 201,
+    "left_left_lower_arm": 223,
+    "body": 21,
+    "right_hand": 31,
+    "left_hand": 42,
+    "right_upper_leg": 95,
+    "left_upper_leg": 106,
+    "right_lower_leg": 138,
+    "left_lower_leg": 148,
+    "right_foot": 63,
+    "left_foot": 53,
 }
 
 def extend_arm_mask(wrist, elbow, scale):
@@ -51,9 +74,42 @@ def refine_mask(mask):
 
     return refine_mask
 
-def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: dict, width=384,height=512):
+def find_top_pixel(segmentation, class_id):
+    # 找出给定类别的所有像素点
+    rows, cols = np.where(segmentation == class_id)
+    # 如果没有找到任何像素点，返回None
+    if rows.size == 0:
+        return None
+    # 返回最上面的像素点的纵坐标
+    top_row = np.min(rows)
+    return top_row
+
+def find_down_pixel(segmentation, class_id):
+    # 找出给定类别的所有像素点
+    rows, cols = np.where(segmentation == class_id)
+    # 如果没有找到任何像素点，返回None
+    if rows.size == 0:
+        return None
+    # 返回最上面的像素点的纵坐标
+    down_row = np.max(rows)
+    return down_row
+
+def find_bottom_left_pixel(segmentation, class_id):
+    # 找出给定类别的所有像素点
+    rows, cols = np.where(segmentation == class_id)
+    # 如果没有找到任何像素点，返回None
+    if rows.size == 0:
+        return None
+    # 返回最左且最下的像素点
+    bottom_row = np.max(rows)
+    left_col = np.min(cols[rows == bottom_row])
+    return bottom_row, left_col
+
+def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: dict, pose_matrix: np.array, width=384,height=512):
     im_parse = model_parse.resize((width, height), Image.NEAREST)
     parse_array = np.array(im_parse)
+
+    # pose_matrix # (width, height)
 
     if model_type == 'hd':
         arm_width = 60
@@ -62,9 +118,9 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
     else:
         raise ValueError("model_type must be \'hd\' or \'dc\'!")
 
-    parse_head = (parse_array == 1).astype(np.float32) + \
-                 (parse_array == 3).astype(np.float32) + \
-                 (parse_array == 11).astype(np.float32)
+    parse_head = (parse_array == label_map["hat"]).astype(np.float32) + \
+                 (parse_array == label_map["sunglasses"]).astype(np.float32) + \
+                 (parse_array == label_map["head"]).astype(np.float32)
 
     parser_mask_fixed = (parse_array == label_map["left_shoe"]).astype(np.float32) + \
                         (parse_array == label_map["right_shoe"]).astype(np.float32) + \
@@ -74,31 +130,37 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
 
     parser_mask_changeable = (parse_array == label_map["background"]).astype(np.float32)
 
-    arms_left = (parse_array == 14).astype(np.float32)
-    arms_right = (parse_array == 15).astype(np.float32)
+    arms_left = (parse_array == label_map["left_arm"]).astype(np.float32)
+    arms_right = (parse_array == label_map["right_arm"]).astype(np.float32)
+
+    # import pdb; pdb.set_trace()
+    if (parse_array == label_map["dress"]).sum() != 0:
+        original_category = category
+        category = 'dresses'
+        
 
     if category == 'dresses':
-        parse_mask = (parse_array == 7).astype(np.float32) + \
-                     (parse_array == 4).astype(np.float32) + \
-                     (parse_array == 5).astype(np.float32) + \
-                     (parse_array == 6).astype(np.float32)
+        parse_mask = (parse_array == label_map["dress"]).astype(np.float32) + \
+                     (parse_array == label_map["upper_clothes"]).astype(np.float32) + \
+                     (parse_array == label_map["skirt"]).astype(np.float32) + \
+                     (parse_array == label_map["pants"]).astype(np.float32)
 
         parser_mask_changeable += np.logical_and(parse_array, np.logical_not(parser_mask_fixed))
 
     elif category == 'upper_body':
-        parse_mask = (parse_array == 4).astype(np.float32) + (parse_array == 7).astype(np.float32)
+        parse_mask = (parse_array == label_map["upper_clothes"]).astype(np.float32) + (parse_array == label_map["dress"]).astype(np.float32)
         parser_mask_fixed_lower_cloth = (parse_array == label_map["skirt"]).astype(np.float32) + \
                                         (parse_array == label_map["pants"]).astype(np.float32)
         parser_mask_fixed += parser_mask_fixed_lower_cloth
         parser_mask_changeable += np.logical_and(parse_array, np.logical_not(parser_mask_fixed))
     elif category == 'lower_body':
-        parse_mask = (parse_array == 6).astype(np.float32) + \
-                     (parse_array == 12).astype(np.float32) + \
-                     (parse_array == 13).astype(np.float32) + \
-                     (parse_array == 5).astype(np.float32)
+        parse_mask = (parse_array == label_map["pants"]).astype(np.float32) + \
+                     (parse_array == label_map["left_leg"]).astype(np.float32) + \
+                     (parse_array == label_map["right_leg"]).astype(np.float32) + \
+                     (parse_array == label_map["skirt"]).astype(np.float32)
         parser_mask_fixed += (parse_array == label_map["upper_clothes"]).astype(np.float32) + \
-                             (parse_array == 14).astype(np.float32) + \
-                             (parse_array == 15).astype(np.float32)
+                             (parse_array == label_map["left_arm"]).astype(np.float32) + \
+                             (parse_array == label_map["right_arm"]).astype(np.float32)
         parser_mask_changeable += np.logical_and(parse_array, np.logical_not(parser_mask_fixed))
     else:
         raise NotImplementedError
@@ -146,7 +208,7 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
     parser_mask_fixed = np.logical_or(parser_mask_fixed, parse_head)
     parse_mask = cv2.dilate(parse_mask, np.ones((5, 5), np.uint16), iterations=5)
     if category == 'dresses' or category == 'upper_body':
-        neck_mask = (parse_array == 18).astype(np.float32)
+        neck_mask = (parse_array == label_map["neck"]).astype(np.float32)
         neck_mask = cv2.dilate(neck_mask, np.ones((5, 5), np.uint16), iterations=1)
         neck_mask = np.logical_and(neck_mask, np.logical_not(parse_head))
         parse_mask = np.logical_or(parse_mask, neck_mask)
@@ -157,6 +219,23 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
 
     parse_mask_total = np.logical_or(parse_mask, parser_mask_fixed)
     inpaint_mask = 1 - parse_mask_total
+
+    # import pdb; pdb.set_trace()
+    if category == 'dresses':
+        top_right_upper_leg = find_top_pixel(pose_matrix, densepose_map["right_upper_leg"])
+        top_left_upper_leg = find_top_pixel(pose_matrix, densepose_map["left_upper_leg"])
+        if original_category == "lower_body":
+            inpaint_mask[:min(top_right_upper_leg, top_left_upper_leg), :] = False
+
+            if (parse_array == label_map["right_foot"]).sum() == 0:
+
+
+            if (parse_array == label_map["left_foot"]).sum() == 0:
+
+
+        elif original_category == "upper_body":
+            inpaint_mask[min(top_right_upper_leg, top_left_upper_leg):, :] = False
+            
     img = np.where(inpaint_mask, 255, 0)
     dst = hole_fill(img.astype(np.uint8))
     dst = refine_mask(dst)
@@ -165,3 +244,7 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
     mask_gray = Image.fromarray(inpaint_mask.astype(np.uint8) * 127)
 
     return mask, mask_gray
+
+if __name__ == '__main__':
+
+    pass
